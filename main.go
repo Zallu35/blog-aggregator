@@ -35,6 +35,10 @@ func main() {
 	cmds := &command.Commands{}
 	cmds.Register("login", command.HandlerLogin)
 	cmds.Register("register", command.HandlerRegister)
+	cmds.Register("reset", command.HandlerReset)
+	cmds.Register("users", command.HandlerUsers)
+	cmds.Register("agg", command.HandlerAgg)
+	cmds.Register("addfeed", command.HandlerAddFeed)
 
 	// Get command-line arguments
 	if len(os.Args) < 2 {

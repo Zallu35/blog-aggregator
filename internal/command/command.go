@@ -9,6 +9,7 @@ import (
 
 	"github.com/Zallu35/blog-aggregator/internal/app_state"
 	"github.com/Zallu35/blog-aggregator/internal/database"
+	"github.com/Zallu35/blog-aggregator/internal/rss"
 	"github.com/google/uuid"
 )
 
@@ -43,7 +44,7 @@ func HandlerLogin(s *app_state.AppState, cmd Command) error {
 
 	username := cmd.Args[0]
 
-	_, err := s.DBConn.GetUser(context.Background(), username)
+	_, err := s.DBConn.GetUserByName(context.Background(), username)
 	if err != nil {
 		fmt.Printf("Error fetching user '%s': %v\n", username, err)
 		os.Exit(1)
@@ -89,5 +90,79 @@ func HandlerRegister(s *app_state.AppState, cmd Command) error {
 	fmt.Printf("User '%s' created successfully!\n", username)
 	fmt.Printf("User data: %+v\n", user)
 
+	return nil
+}
+
+func HandlerUsers(s *app_state.AppState, cmd Command) error {
+	users, err := s.DBConn.GetUsers(context.Background())
+	if err != nil {
+		fmt.Printf("Error fetching users: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, user := range users {
+		if user.Name == s.Config.CurrentUserName {
+			fmt.Printf("* %s (current)\n", user.Name)
+		} else {
+			fmt.Printf("* %s\n", user.Name)
+		}
+	}
+
+	return nil
+}
+
+func HandlerAgg(s *app_state.AppState, cmd Command) error {
+	feed, err := rss.FetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
+	if err != nil {
+		return fmt.Errorf("error fetching feed: %w", err)
+	}
+
+	fmt.Printf("%+v\n", feed)
+	return nil
+}
+
+func HandlerAddFeed(s *app_state.AppState, cmd Command) error {
+	if len(cmd.Args) < 2 {
+		return errors.New("the addfeed handler expects two arguments: the feed name and url")
+	}
+
+	name := cmd.Args[0]
+	url := cmd.Args[1]
+
+	user, err := s.DBConn.GetUserByName(context.Background(), s.Config.CurrentUserName)
+	if err != nil {
+		fmt.Printf("Error fetching current user '%s': %v\n", s.Config.CurrentUserName, err)
+		os.Exit(1)
+	}
+
+	now := time.Now()
+
+	feed, err := s.DBConn.CreateFeed(context.Background(), database.CreateFeedParams{
+		ID:        uuid.New(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		Name:      name,
+		Url:       url,
+		UserID:    user.ID,
+	})
+	if err != nil {
+		fmt.Printf("Error creating feed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Feed created successfully!\n")
+	fmt.Printf("Feed data: %+v\n", feed)
+
+	return nil
+}
+
+func HandlerReset(s *app_state.AppState, cmd Command) error {
+	err := s.DBConn.DeleteAllUsers(context.Background())
+	if err != nil {
+		fmt.Printf("Error resetting users: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("All users deleted successfully.")
 	return nil
 }
