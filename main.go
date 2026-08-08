@@ -38,7 +38,11 @@ func main() {
 	cmds.Register("reset", command.HandlerReset)
 	cmds.Register("users", command.HandlerUsers)
 	cmds.Register("agg", command.HandlerAgg)
-	cmds.Register("addfeed", command.HandlerAddFeed)
+	cmds.Register("addfeed", command.MiddlewareLoggedIn(command.HandlerAddFeed))
+	cmds.Register("feeds", command.HandlerFeeds)
+	cmds.Register("follow", command.MiddlewareLoggedIn(command.HandlerFollow))
+	cmds.Register("following", command.MiddlewareLoggedIn(command.HandlerFollowing))
+	cmds.Register("unfollow", command.MiddlewareLoggedIn(command.HandlerUnfollow))
 
 	// Get command-line arguments
 	if len(os.Args) < 2 {
@@ -58,6 +62,4 @@ func main() {
 		fmt.Printf("Error running command \"%s\": %v\n", cmd.Name, err)
 		os.Exit(1)
 	}
-
-	fmt.Println(state.Config)
 }

@@ -37,6 +37,18 @@ func (c *Commands) Register(name string, f func(*app_state.AppState, Command) er
 	c.CommandMap[name] = f
 }
 
+func MiddlewareLoggedIn(handler func(*app_state.AppState, Command, database.User) error) func(*app_state.AppState, Command) error {
+	return func(s *app_state.AppState, cmd Command) error {
+		user, err := s.DBConn.GetUserByName(context.Background(), s.Config.CurrentUserName)
+		if err != nil {
+			fmt.Printf("Error fetching current user '%s': %v\n", s.Config.CurrentUserName, err)
+			os.Exit(1)
+		}
+
+		return handler(s, cmd, user)
+	}
+}
+
 func HandlerLogin(s *app_state.AppState, cmd Command) error {
 	if len(cmd.Args) == 0 {
 		return errors.New("the login handler expects a single argument: the username")
@@ -112,28 +124,54 @@ func HandlerUsers(s *app_state.AppState, cmd Command) error {
 }
 
 func HandlerAgg(s *app_state.AppState, cmd Command) error {
-	feed, err := rss.FetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
-	if err != nil {
-		return fmt.Errorf("error fetching feed: %w", err)
+	if len(cmd.Args) == 0 {
+		return errors.New("the agg handler expects a single argument: time_between_reqs")
 	}
 
-	fmt.Printf("%+v\n", feed)
+	timeBetweenRequests, err := time.ParseDuration(cmd.Args[0])
+	if err != nil {
+		return fmt.Errorf("error parsing time_between_reqs: %w", err)
+	}
+
+	fmt.Printf("Collecting feeds every %s\n", timeBetweenRequests)
+
+	ticker := time.NewTicker(timeBetweenRequests)
+	for ; ; <-ticker.C {
+		if err := scrapeFeeds(s); err != nil {
+			fmt.Printf("Error scraping feeds: %v\n", err)
+		}
+	}
+}
+
+func scrapeFeeds(s *app_state.AppState) error {
+	feed, err := s.DBConn.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return fmt.Errorf("error fetching next feed: %w", err)
+	}
+
+	if err := s.DBConn.MarkFeedFetched(context.Background(), feed.ID); err != nil {
+		return fmt.Errorf("error marking feed fetched: %w", err)
+	}
+
+	rssFeed, err := rss.FetchFeed(context.Background(), feed.Url)
+	if err != nil {
+		return fmt.Errorf("error fetching feed '%s': %w", feed.Url, err)
+	}
+
+	for _, item := range rssFeed.Channel.Item {
+		fmt.Println(item.Title)
+	}
+
 	return nil
 }
 
-func HandlerAddFeed(s *app_state.AppState, cmd Command) error {
+func HandlerAddFeed(s *app_state.AppState, cmd Command, user database.User) error {
 	if len(cmd.Args) < 2 {
 		return errors.New("the addfeed handler expects two arguments: the feed name and url")
 	}
 
 	name := cmd.Args[0]
 	url := cmd.Args[1]
-
-	user, err := s.DBConn.GetUserByName(context.Background(), s.Config.CurrentUserName)
-	if err != nil {
-		fmt.Printf("Error fetching current user '%s': %v\n", s.Config.CurrentUserName, err)
-		os.Exit(1)
-	}
 
 	now := time.Now()
 
@@ -152,6 +190,104 @@ func HandlerAddFeed(s *app_state.AppState, cmd Command) error {
 
 	fmt.Printf("Feed created successfully!\n")
 	fmt.Printf("Feed data: %+v\n", feed)
+
+	feedFollow, err := createFeedFollow(s, user.ID, feed.ID)
+	if err != nil {
+		fmt.Printf("Error creating feed follow: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("'%s' is now following '%s'\n", feedFollow.UserName, feedFollow.FeedName)
+
+	return nil
+}
+
+func HandlerFollow(s *app_state.AppState, cmd Command, user database.User) error {
+	if len(cmd.Args) == 0 {
+		return errors.New("the follow handler expects a single argument: the feed url")
+	}
+
+	url := cmd.Args[0]
+
+	feed, err := s.DBConn.GetFeedByUrl(context.Background(), url)
+	if err != nil {
+		fmt.Printf("Error fetching feed '%s': %v\n", url, err)
+		os.Exit(1)
+	}
+
+	feedFollow, err := createFeedFollow(s, user.ID, feed.ID)
+	if err != nil {
+		fmt.Printf("Error creating feed follow: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("'%s' is now following '%s'\n", feedFollow.UserName, feedFollow.FeedName)
+
+	return nil
+}
+
+func HandlerFollowing(s *app_state.AppState, cmd Command, user database.User) error {
+	feedFollows, err := s.DBConn.GetFeedFollowsForUser(context.Background(), user.ID)
+	if err != nil {
+		fmt.Printf("Error fetching feed follows: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, feedFollow := range feedFollows {
+		fmt.Printf("* %s\n", feedFollow.FeedName)
+	}
+
+	return nil
+}
+
+func HandlerUnfollow(s *app_state.AppState, cmd Command, user database.User) error {
+	if len(cmd.Args) == 0 {
+		return errors.New("the unfollow handler expects a single argument: the feed url")
+	}
+
+	url := cmd.Args[0]
+
+	feed, err := s.DBConn.GetFeedByUrl(context.Background(), url)
+	if err != nil {
+		fmt.Printf("Error fetching feed '%s': %v\n", url, err)
+		os.Exit(1)
+	}
+
+	err = s.DBConn.DeleteFeedFollow(context.Background(), database.DeleteFeedFollowParams{
+		UserID: user.ID,
+		FeedID: feed.ID,
+	})
+	if err != nil {
+		fmt.Printf("Error deleting feed follow: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("'%s' has unfollowed '%s'\n", user.Name, feed.Name)
+
+	return nil
+}
+
+func createFeedFollow(s *app_state.AppState, userID, feedID uuid.UUID) (database.CreateFeedFollowRow, error) {
+	now := time.Now()
+	return s.DBConn.CreateFeedFollow(context.Background(), database.CreateFeedFollowParams{
+		ID:        uuid.New(),
+		CreatedAt: now,
+		UpdatedAt: now,
+		UserID:    userID,
+		FeedID:    feedID,
+	})
+}
+
+func HandlerFeeds(s *app_state.AppState, cmd Command) error {
+	feeds, err := s.DBConn.GetFeeds(context.Background())
+	if err != nil {
+		fmt.Printf("Error fetching feeds: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, feed := range feeds {
+		fmt.Printf("* %s (%s) added by %s\n", feed.Name, feed.Url, feed.UserName)
+	}
 
 	return nil
 }
