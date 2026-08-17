@@ -2,15 +2,18 @@ package command
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/Zallu35/blog-aggregator/internal/app_state"
 	"github.com/Zallu35/blog-aggregator/internal/database"
 	"github.com/Zallu35/blog-aggregator/internal/rss"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 type Command struct {
@@ -159,10 +162,48 @@ func scrapeFeeds(s *app_state.AppState) error {
 	}
 
 	for _, item := range rssFeed.Channel.Item {
-		fmt.Println(item.Title)
+		_, err := s.DBConn.CreatePost(context.Background(), database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+			Title:       item.Title,
+			Url:         item.Link,
+			Description: sql.NullString{String: item.Description, Valid: item.Description != ""},
+			PublishedAt: parsePubDate(item.PubDate),
+			FeedID:      feed.ID,
+		})
+		if err != nil {
+			if isDuplicatePostError(err) {
+				continue
+			}
+			fmt.Printf("Error saving post '%s': %v\n", item.Title, err)
+			continue
+		}
 	}
 
 	return nil
+}
+
+var pubDateFormats = []string{
+	time.RFC1123Z,
+	time.RFC1123,
+	time.RFC3339,
+	"2006-01-02T15:04:05Z",
+	"2006-01-02 15:04:05",
+}
+
+func parsePubDate(pubDate string) sql.NullTime {
+	for _, format := range pubDateFormats {
+		if t, err := time.Parse(format, pubDate); err == nil {
+			return sql.NullTime{Time: t, Valid: true}
+		}
+	}
+	return sql.NullTime{}
+}
+
+func isDuplicatePostError(err error) bool {
+	pqErr, ok := err.(*pq.Error)
+	return ok && pqErr.Code == "23505"
 }
 
 func HandlerAddFeed(s *app_state.AppState, cmd Command, user database.User) error {
@@ -287,6 +328,32 @@ func HandlerFeeds(s *app_state.AppState, cmd Command) error {
 
 	for _, feed := range feeds {
 		fmt.Printf("* %s (%s) added by %s\n", feed.Name, feed.Url, feed.UserName)
+	}
+
+	return nil
+}
+
+func HandlerBrowse(s *app_state.AppState, cmd Command, user database.User) error {
+	limit := 2
+	if len(cmd.Args) > 0 {
+		parsedLimit, err := strconv.Atoi(cmd.Args[0])
+		if err != nil {
+			return fmt.Errorf("error parsing limit: %w", err)
+		}
+		limit = parsedLimit
+	}
+
+	posts, err := s.DBConn.GetPostsForUser(context.Background(), database.GetPostsForUserParams{
+		UserID: user.ID,
+		Limit:  int32(limit),
+	})
+	if err != nil {
+		fmt.Printf("Error fetching posts: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, post := range posts {
+		fmt.Printf("* %s (%s)\n", post.Title, post.Url)
 	}
 
 	return nil
